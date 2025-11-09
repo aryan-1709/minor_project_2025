@@ -25,8 +25,9 @@ public class PSOScheduler {
     private static List<Cloudlet> cloudletList;
     private static List<Vm> vmList;
     private static Datacenter[] datacenter;
-    private static double[][] commMatrix; // Communication Time Matrix
-    private static double[][] execMatrix; // Execution Time Matrix
+    public static double[][] execMatrix;
+    public static double[][] commMatrix;
+
 
     // --- PSO-related Class Members ---
     private static Particle[] swarm;            // The population of particles
@@ -188,7 +189,7 @@ public class PSOScheduler {
      *
      * @param psoSolution The task-to-VM mapping from runPSO().
      */
-    private static void runCloudSim(int[] psoSolution) {
+    public static void runCloudSim(int[] solution) {
         Log.printLine("Initializing CloudSim...");
         try {
             int num_user = 1;
@@ -197,39 +198,37 @@ public class PSOScheduler {
 
             CloudSim.init(num_user, calendar, trace_flag);
 
-            // Second step: Create Datacenters
+            // Create Datacenters
             datacenter = new Datacenter[Constants.NO_OF_DATA_CENTERS];
             for (int i = 0; i < Constants.NO_OF_DATA_CENTERS; i++) {
                 datacenter[i] = DatacenterCreator.createDatacenter("Datacenter_" + i);
             }
 
-            // Third step: Create Broker
-            // We use the *standard* DatacenterBroker, not the SJF one.
+            // Create Broker
             DatacenterBroker broker = createBroker("Broker_0");
             int brokerId = broker.getId();
 
-            // Fourth step: Create VMs and Cloudlets
+            // Create VMs
             vmList = createVM(brokerId, Constants.NO_OF_DATA_CENTERS);
-            
-            // Create cloudlets using the PSO solution for binding
-            cloudletList = createCloudlet(brokerId, Constants.NO_OF_TASKS, 0, psoSolution);
+
+            // Create Cloudlets using SA schedule
+            cloudletList = createCloudlet(brokerId, Constants.NO_OF_TASKS, 0, solution);
 
             broker.submitVmList(vmList);
             broker.submitCloudletList(cloudletList);
 
-            // Fifth step: Starts the simulation
             CloudSim.startSimulation();
 
-            // Final step: Print results
             List<Cloudlet> newList = broker.getCloudletReceivedList();
             CloudSim.stopSimulation();
 
             printCloudletList(newList);
 
-            Log.printLine(PSOScheduler.class.getName() + " finished!");
+            Log.printLine("Simulation Finished Successfully (SA Based Scheduling).");
+
         } catch (Exception e) {
             e.printStackTrace();
-            Log.printLine("The simulation has been terminated due to an unexpected error");
+            Log.printLine("Simulation terminated due to an error.");
         }
     }
 
