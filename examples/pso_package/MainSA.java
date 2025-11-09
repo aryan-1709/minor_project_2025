@@ -19,7 +19,8 @@ public class MainSA {
         int[] saSolution = SimulatedAnnealingScheduler.runSA(execMatrix, commMatrix);
 
         // Step 4: Run CloudSim using SA solution
-        PSOScheduler.runCloudSim(saSolution);
+        PSOScheduler.runCloudSim(saSolution, "SA");
+
 
         System.out.println("\n--- Simulation Finished (SA Based Scheduling) ---\n");
     }

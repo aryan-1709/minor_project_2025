@@ -189,48 +189,48 @@ public class PSOScheduler {
      *
      * @param psoSolution The task-to-VM mapping from runPSO().
      */
-    public static void runCloudSim(int[] solution) {
-        Log.printLine("Initializing CloudSim...");
-        try {
-            int num_user = 1;
-            Calendar calendar = Calendar.getInstance();
-            boolean trace_flag = false;
+    public static void runCloudSim(int[] solution, String algoName) {
+    Log.printLine("Initializing CloudSim...");
+    try {
+        int num_user = 1;
+        Calendar calendar = Calendar.getInstance();
+        boolean trace_flag = false;
 
-            CloudSim.init(num_user, calendar, trace_flag);
+        CloudSim.init(num_user, calendar, trace_flag);
 
-            // Create Datacenters
-            datacenter = new Datacenter[Constants.NO_OF_DATA_CENTERS];
-            for (int i = 0; i < Constants.NO_OF_DATA_CENTERS; i++) {
-                datacenter[i] = DatacenterCreator.createDatacenter("Datacenter_" + i);
-            }
-
-            // Create Broker
-            DatacenterBroker broker = createBroker("Broker_0");
-            int brokerId = broker.getId();
-
-            // Create VMs
-            vmList = createVM(brokerId, Constants.NO_OF_DATA_CENTERS);
-
-            // Create Cloudlets using SA schedule
-            cloudletList = createCloudlet(brokerId, Constants.NO_OF_TASKS, 0, solution);
-
-            broker.submitVmList(vmList);
-            broker.submitCloudletList(cloudletList);
-
-            CloudSim.startSimulation();
-
-            List<Cloudlet> newList = broker.getCloudletReceivedList();
-            CloudSim.stopSimulation();
-
-            printCloudletList(newList);
-
-            Log.printLine("Simulation Finished Successfully (SA Based Scheduling).");
-
-        } catch (Exception e) {
-            e.printStackTrace();
-            Log.printLine("Simulation terminated due to an error.");
+        // Create Datacenters
+        datacenter = new Datacenter[Constants.NO_OF_DATA_CENTERS];
+        for (int i = 0; i < Constants.NO_OF_DATA_CENTERS; i++) {
+            datacenter[i] = DatacenterCreator.createDatacenter("Datacenter_" + i);
         }
+
+        // Create Broker
+        DatacenterBroker broker = createBroker("Broker_0");
+        int brokerId = broker.getId();
+
+        // Create VMs
+        vmList = createVM(brokerId, Constants.NO_OF_DATA_CENTERS);
+
+        // Create Cloudlets using given schedule
+        cloudletList = createCloudlet(brokerId, Constants.NO_OF_TASKS, 0, solution);
+
+        broker.submitVmList(vmList);
+        broker.submitCloudletList(cloudletList);
+
+        CloudSim.startSimulation();
+        List<Cloudlet> newList = broker.getCloudletReceivedList();
+        CloudSim.stopSimulation();
+
+        printCloudletList(newList);
+
+        Log.printLine("Simulation Finished Successfully (" + algoName + " Based Scheduling).");
+
+    } catch (Exception e) {
+        e.printStackTrace();
+        Log.printLine("Simulation terminated due to an error (" + algoName + ").");
     }
+}
+
 
     /**
      * Creates a standard DatacenterBroker.
