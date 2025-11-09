@@ -36,6 +36,14 @@ public class NewParticle {
         fitness = Double.MAX_VALUE;
         personalBestFitness = Double.MAX_VALUE;
     }
+    
+    public NewParticle(int[] givenPosition, int numVMs) {
+        this.position = givenPosition.clone();
+        this.velocity = new double[givenPosition.length];
+        this.personalBest = givenPosition.clone();
+        this.fitness = Double.MAX_VALUE;
+        this.personalBestFitness = Double.MAX_VALUE;
+    }
 
     // --------------------------------------------------------------------
     // Evaluate fitness using makespan calculation (as defined in PSOScheduler)
