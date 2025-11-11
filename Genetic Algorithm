@@ -1,285 +1,334 @@
-// GaScheduler.java
-// Genetic Algorithm for scheduling n tasks on m identical machines (minimize makespan).
-// Encoding: permutation of task indices. Decoding: list-scheduling (assign next task to earliest-free machine).
-// Simple: tournament selection, Order Crossover (OX), swap mutation, elitism.
+// GaSchedulerMOGA.java
+// MO-GA hybrid scheduler (simple Multivalent Optimizer initializer + GA refinement).
+// - Tasks have length (million instructions).
+// - VMs have MIPS (speed). ECT(task,vm) = taskLen / vm.MIPS (double).
+// - MO initializer: greedy ECT assignment + small random perturbations to produce seed population.
+// - GA: permutation encoding + list-scheduling decoder that uses ECT as processing times on each VM.
+// - Two-point crossover, two-point mutation (segment swap / inversion), elitism, and stagnation termination.
 
 import java.util.*;
 import java.util.stream.Collectors;
 
-public class GaScheduler {
+public class GaSchedulerMOGA {
 
-    // ---------- Utilities ----------
+    // -------------------- Domain types --------------------
+    static class Task {
+        int id;
+        double length; // in million instructions
+        Task(int id, double length) { this.id = id; this.length = length; }
+    }
+
+    static class VM {
+        int id;
+        double mips; // speed
+        VM(int id, double mips) { this.id = id; this.mips = mips; }
+    }
+
+    static class Assignment {
+        int vmId;
+        double start;
+        double finish;
+        Assignment(int vmId, double start, double finish) { this.vmId = vmId; this.start = start; this.finish = finish; }
+    }
+
     static class MachineAvail implements Comparable<MachineAvail> {
-        int time;
-        int machineId;
-        MachineAvail(int time, int machineId) { this.time = time; this.machineId = machineId; }
+        double time;
+        int vmId;
+        MachineAvail(double time, int vmId) { this.time = time; this.vmId = vmId; }
         public int compareTo(MachineAvail other) {
-            if (this.time != other.time) return Integer.compare(this.time, other.time);
-            return Integer.compare(this.machineId, other.machineId);
+            if (this.time != other.time) return Double.compare(this.time, other.time);
+            return Integer.compare(this.vmId, other.vmId);
         }
     }
 
-    static class TaskAssignment {
-        int machine;
-        int start;
-        int finish;
-        TaskAssignment(int machine, int start, int finish) { this.machine = machine; this.start = start; this.finish = finish; }
+    // -------------------- ECT computation (paper Eq.6) --------------------
+    static double ect(Task t, VM v) {
+        return t.length / v.mips; // estimated completion time on vm
     }
 
-    // ---------- Problem instance ----------
-    public static int[] makeInstance(int nTasks, int seed) {
-        Random rnd = new Random(seed);
-        int[] p = new int[nTasks];
-        for (int i = 0; i < nTasks; i++) p[i] = 1 + rnd.nextInt(100); // 1..100
-        return p;
+    // -------------------- Decoder: permutation -> schedule & makespan (heterogeneous) --------------------
+    // Uses list scheduling: tasks in order assigned to earliest free VM; processing time for task on VM computed when scheduling.
+    static class DecodeResult {
+        double makespan;
+        Map<Integer, Assignment> schedule; // taskID -> assignment
+        DecodeResult(double makespan, Map<Integer, Assignment> schedule) { this.makespan = makespan; this.schedule = schedule; }
     }
 
-    // ---------- Decoder: permutation -> makespan, schedule ----------
-    public static Map<String, Object> decodePermutation(int[] perm, int[] procTimes, int nMachines) {
+    static DecodeResult decodePermutation(int[] perm, Task[] tasks, VM[] vms) {
         PriorityQueue<MachineAvail> pq = new PriorityQueue<>();
-        for (int i = 0; i < nMachines; i++) pq.add(new MachineAvail(0, i));
-
-        Map<Integer, TaskAssignment> schedule = new HashMap<>();
+        for (int i = 0; i < vms.length; i++) pq.add(new MachineAvail(0.0, vms[i].id));
+        Map<Integer, Assignment> schedule = new HashMap<>();
         for (int idx = 0; idx < perm.length; idx++) {
-            int t = perm[idx];
+            int taskId = perm[idx];
             MachineAvail ma = pq.poll();
-            int start = ma.time;
-            int finish = start + procTimes[t];
-            schedule.put(t, new TaskAssignment(ma.machineId, start, finish));
-            pq.add(new MachineAvail(finish, ma.machineId));
+            VM chosenVm = vms[ma.vmId];
+            Task t = tasks[taskId];
+            double proc = ect(t, chosenVm);
+            double start = ma.time;
+            double finish = start + proc;
+            schedule.put(taskId, new Assignment(chosenVm.id, start, finish));
+            pq.add(new MachineAvail(finish, chosenVm.id));
         }
-        // makespan is max finish time among machines; pq contains final times
-        int makespan = pq.stream().mapToInt(m -> m.time).max().orElse(0);
-        Map<String, Object> out = new HashMap<>();
-        out.put("makespan", makespan);
-        out.put("schedule", schedule);
-        return out;
+        double makespan = pq.stream().mapToDouble(m -> m.time).max().orElse(0.0);
+        return new DecodeResult(makespan, schedule);
     }
 
-    // ---------- GA components ----------
-    public static List<int[]> initialPopulation(int popSize, int nTasks, Random rnd) {
-        List<int[]> pop = new ArrayList<>(popSize);
+    // -------------------- LPT baseline but for heterogeneous: greedy by max ECT reduction (approx) --------------------
+    static DecodeResult greedyBaseline(Task[] tasks, VM[] vms) {
+        // Simple heuristic: assign tasks one by one to VM that yields earliest finish (respecting current avail)
+        double[] avail = new double[vms.length];
+        Map<Integer, Assignment> schedule = new HashMap<>();
+        // sort tasks descending by length (approx large tasks first)
+        Integer[] order = new Integer[tasks.length];
+        for (int i=0;i<tasks.length;i++) order[i] = i;
+        Arrays.sort(order, (a,b) -> Double.compare(tasks[b].length, tasks[a].length));
+        for (int tid : order) {
+            double bestFinish = Double.POSITIVE_INFINITY;
+            int bestVm = 0;
+            for (VM vm : vms) {
+                double p = ect(tasks[tid], vm);
+                double finish = avail[vm.id] + p;
+                if (finish < bestFinish) { bestFinish = finish; bestVm = vm.id; }
+            }
+            double start = avail[bestVm];
+            schedule.put(tid, new Assignment(bestVm, start, bestFinish));
+            avail[bestVm] = bestFinish;
+        }
+        double makespan = Arrays.stream(avail).max().orElse(0.0);
+        return new DecodeResult(makespan, schedule);
+    }
+
+    // -------------------- Multivalent Optimizer (MO) initializer --------------------
+    // Produces K seed individuals by greedy ECT assignment and randomized perturbations (wormhole moves).
+    static List<int[]> moInitializer(Task[] tasks, VM[] vms, int seeds, Random rnd) {
+        List<int[]> seedsList = new ArrayList<>();
+        // base greedy: assign tasks to their best VM (min ECT) and produce an order per VM (by finish times)
+        double[] avail = new double[vms.length];
+        List<List<Integer>> perVm = new ArrayList<>();
+        for (int i=0;i<vms.length;i++) perVm.add(new ArrayList<>());
+        for (Task t : tasks) {
+            int bestVm = 0;
+            double best = Double.POSITIVE_INFINITY;
+            for (VM vm : vms) {
+                double p = ect(t, vm);
+                if (p < best) { best = p; bestVm = vm.id; }
+            }
+            perVm.get(bestVm).add(t.id);
+        }
+        // build a base permutation by concatenating per-VM lists (small heuristic)
         List<Integer> base = new ArrayList<>();
-        for (int i = 0; i < nTasks; i++) base.add(i);
-        for (int k = 0; k < popSize; k++) {
-            Collections.shuffle(base, rnd);
-            int[] ind = new int[nTasks];
-            for (int i = 0; i < nTasks; i++) ind[i] = base.get(i);
-            pop.add(ind);
+        for (List<Integer> lst : perVm) {
+            base.addAll(lst);
         }
-        return pop;
+        // produce several seeds: some pure base, some with random perturbations (wormhole moves)
+        for (int s = 0; s < seeds; s++) {
+            int[] perm = new int[tasks.length];
+            // take base and apply random swaps/inserts proportional to s
+            List<Integer> tmp = new ArrayList<>(base);
+            // if base doesn't include all tasks (rare), add remaining
+            for (int i=0;i<tasks.length;i++) if (!tmp.contains(i)) tmp.add(i);
+            // perturb
+            int perturb = 1 + rnd.nextInt(Math.max(1, tasks.length/10)); // small perturbation
+            for (int k=0;k<perturb;k++) {
+                int i = rnd.nextInt(tmp.size());
+                int j = rnd.nextInt(tmp.size());
+                Collections.swap(tmp, i, j);
+            }
+            // also, sometimes insert a random task at front (wormhole influx)
+            if (rnd.nextDouble() < 0.3) {
+                int i = rnd.nextInt(tmp.size());
+                int val = tmp.remove(i);
+                tmp.add(0, val);
+            }
+            for (int i=0;i<tmp.size();i++) perm[i] = tmp.get(i);
+            seedsList.add(perm);
+        }
+        return seedsList;
     }
 
-    public static int fitnessOf(int[] individual, int[] procTimes, int nMachines) {
-        return (int) decodePermutation(individual, procTimes, nMachines).get("makespan");
-    }
+    // -------------------- GA: two-point crossover + two-point mutation --------------------
+    static int[] copyArray(int[] a) { return Arrays.copyOf(a, a.length); }
 
-    public static int[] tournamentSelect(List<int[]> pop, int[] procTimes, int nMachines, Random rnd) {
-        // sample 2, return better (lower makespan)
-        int a = rnd.nextInt(pop.size());
-        int b = rnd.nextInt(pop.size());
-        int[] ia = pop.get(a);
-        int[] ib = pop.get(b);
-        return fitnessOf(ia, procTimes, nMachines) < fitnessOf(ib, procTimes, nMachines) ? ia : ib;
-    }
-
-    public static int[][] orderCrossover(int[] p1, int[] p2, Random rnd) {
+    static int[][] twoPointCrossover(int[] p1, int[] p2, Random rnd) {
         int n = p1.length;
         int a = rnd.nextInt(n);
         int b = rnd.nextInt(n);
-        if (a > b) { int t=a; a=b; b=t; }
+        if (a > b) { int t = a; a = b; b = t; }
         int[] c1 = new int[n];
         int[] c2 = new int[n];
         Arrays.fill(c1, -1);
         Arrays.fill(c2, -1);
         // copy slice
         for (int i = a; i <= b; i++) { c1[i] = p1[i]; c2[i] = p2[i]; }
-        // fill remaining from other parent in order
-        int idx1 = 0, idx2 = 0;
-        for (int i = 0; i < n; i++) {
-            if (c1[i] == -1) {
-                while (containsInArray(c1, p2[idx1])) idx1++;
-                c1[i] = p2[idx1++];
-            }
-            if (c2[i] == -1) {
-                while (containsInArray(c2, p1[idx2])) idx2++;
-                c2[i] = p1[idx2++];
-            }
+        // fill remaining preserving order
+        List<Integer> p2rem = new ArrayList<>();
+        for (int v : p2) if (!contains(c1, v)) p2rem.add(v);
+        List<Integer> p1rem = new ArrayList<>();
+        for (int v : p1) if (!contains(c2, v)) p1rem.add(v);
+        int idx1=0, idx2=0;
+        for (int i=0;i<n;i++) {
+            if (c1[i] == -1) c1[i] = p2rem.get(idx1++);
+            if (c2[i] == -1) c2[i] = p1rem.get(idx2++);
         }
         return new int[][]{c1, c2};
     }
 
-    private static boolean containsInArray(int[] arr, int val) {
+    static boolean contains(int[] arr, int val) {
         for (int x : arr) if (x == val) return true;
         return false;
     }
 
-    public static void swapMutation(int[] ind, double mutRate, Random rnd) {
-        if (rnd.nextDouble() < mutRate) {
-            int i = rnd.nextInt(ind.length);
-            int j = rnd.nextInt(ind.length);
-            int t = ind[i]; ind[i] = ind[j]; ind[j] = t;
+    static void twoPointMutation(int[] ind, Random rnd) {
+        int n = ind.length;
+        // choose two segments and swap them (segment swap mutation)
+        int a = rnd.nextInt(n);
+        int b = rnd.nextInt(n);
+        if (a > b) { int t = a; a = b; b = t; }
+        // choose a second segment possibly elsewhere
+        int c = rnd.nextInt(n);
+        int d = rnd.nextInt(n);
+        if (c > d) { int t = c; c = d; d = t; }
+        // do segment swap between [a,b] and [c,d] (if lengths equal) else perform block rotate
+        int len1 = b - a + 1;
+        int len2 = d - c + 1;
+        if (len1 == len2) {
+            for (int i = 0; i < len1; i++) {
+                int tmp = ind[a + i]; ind[a + i] = ind[c + i]; ind[c + i] = tmp;
+            }
+        } else {
+            // fallback: reverse each segment
+            reverse(ind, a, b); reverse(ind, c, d);
         }
     }
 
-    // ---------- Main GA ----------
-    public static Map<String, Object> runGa(int[] procTimes,
-                                            int nMachines,
-                                            int popSize,
-                                            int generations,
-                                            double cxRate,
-                                            double mutRate,
-                                            int elitism,
-                                            Long seed,
-                                            boolean verbose) {
-        Random rnd = (seed == null) ? new Random() : new Random(seed);
-        int nTasks = procTimes.length;
-        List<int[]> pop = initialPopulation(popSize, nTasks, rnd);
-        List<Integer> bestHistory = new ArrayList<>();
-        int[] bestSolution = null;
-        int bestCost = Integer.MAX_VALUE;
+    static void reverse(int[] arr, int l, int r) {
+        while (l < r) {
+            int tmp = arr[l]; arr[l] = arr[r]; arr[r] = tmp; l++; r--;
+        }
+    }
+
+    // -------------------- Run MO-GA --------------------
+    static class Result {
+        int[] bestPerm;
+        double bestMakespan;
+        Map<Integer, Assignment> schedule;
+        List<Double> history;
+    }
+
+    static Result runMOGA(Task[] tasks, VM[] vms,
+                          int popSize, int generations,
+                          double cxRate, double mutRate, int elitism,
+                          int moSeeds, int patience, Random rnd) {
+        // 1) MO initializer: create moSeeds candidate permutations
+        List<int[]> initialSeeds = moInitializer(tasks, vms, moSeeds, rnd);
+        List<int[]> population = new ArrayList<>();
+        // Add MO seeds first
+        for (int[] s : initialSeeds) population.add(copyArray(s));
+        // Fill rest randomly
+        while (population.size() < popSize) {
+            int[] p = new int[tasks.length];
+            List<Integer> tmp = new ArrayList<>();
+            for (int i = 0; i < tasks.length; i++) tmp.add(i);
+            Collections.shuffle(tmp, rnd);
+            for (int i = 0; i < tasks.length; i++) p[i] = tmp.get(i);
+            population.add(p);
+        }
+
+        double bestSoFar = Double.POSITIVE_INFINITY;
+        int[] bestPerm = null;
+        List<Double> history = new ArrayList<>();
+        int stagnant = 0;
 
         for (int gen = 0; gen < generations; gen++) {
-            // sort by fitness (ascending)
-            pop.sort(Comparator.comparingInt(ind -> fitnessOf(ind, procTimes, nMachines)));
-            int[] currBest = pop.get(0);
-            int currCost = fitnessOf(currBest, procTimes, nMachines);
-            if (currCost < bestCost) {
-                bestCost = currCost;
-                bestSolution = Arrays.copyOf(currBest, currBest.length);
-            }
-            bestHistory.add(currCost);
-
-            if (verbose && (gen % 20 == 0 || gen == generations - 1)) {
-                System.out.printf("Gen %4d  Best makespan: %d%n", gen, currCost);
-            }
-
-            List<int[]> nextPop = new ArrayList<>();
-            // elitism
-            for (int e = 0; e < elitism && e < pop.size(); e++) {
-                nextPop.add(Arrays.copyOf(pop.get(e), nTasks));
+            // evaluate & sort
+            population.sort(Comparator.comparingDouble(ind -> decodePermutation(ind, tasks, vms).makespan));
+            int[] currBest = population.get(0);
+            double currCost = decodePermutation(currBest, tasks, vms).makespan;
+            if (currCost < bestSoFar - 1e-9) {
+                bestSoFar = currCost;
+                bestPerm = copyArray(currBest);
+                stagnant = 0;
+            } else stagnant++;
+            history.add(currCost);
+            if (stagnant >= patience) {
+                System.out.println("Stopping early at gen " + gen + " due to no improvement for " + patience + " gens.");
+                break;
             }
 
-            while (nextPop.size() < popSize) {
-                int[] parent1 = tournamentSelect(pop, procTimes, nMachines, rnd);
-                int[] parent2 = tournamentSelect(pop, procTimes, nMachines, rnd);
-                int[] child1, child2;
+            // create next population with elitism
+            List<int[]> next = new ArrayList<>();
+            for (int e=0;e<elitism && e<population.size(); e++) next.add(copyArray(population.get(e)));
+            // fill
+            while (next.size() < popSize) {
+                int[] p1 = tournament(population, tasks, vms, rnd);
+                int[] p2 = tournament(population, tasks, vms, rnd);
+                int[] c1 = copyArray(p1), c2 = copyArray(p2);
                 if (rnd.nextDouble() < cxRate) {
-                    int[][] children = orderCrossover(parent1, parent2, rnd);
-                    child1 = children[0];
-                    child2 = children[1];
-                } else {
-                    child1 = Arrays.copyOf(parent1, nTasks);
-                    child2 = Arrays.copyOf(parent2, nTasks);
+                    int[][] kids = twoPointCrossover(p1, p2, rnd);
+                    c1 = kids[0]; c2 = kids[1];
                 }
-                swapMutation(child1, mutRate, rnd);
-                swapMutation(child2, mutRate, rnd);
-                nextPop.add(child1);
-                if (nextPop.size() < popSize) nextPop.add(child2);
+                if (rnd.nextDouble() < mutRate) twoPointMutation(c1, rnd);
+                if (rnd.nextDouble() < mutRate) twoPointMutation(c2, rnd);
+                next.add(c1);
+                if (next.size() < popSize) next.add(c2);
             }
-            pop = nextPop;
+            population = next;
         }
 
-        // final best
-        pop.sort(Comparator.comparingInt(ind -> fitnessOf(ind, procTimes, nMachines)));
-        int[] finalBest = pop.get(0);
-        Map<String, Object> decoded = decodePermutation(finalBest, procTimes, nMachines);
-        int makespan = (int) decoded.get("makespan");
-        @SuppressWarnings("unchecked")
-        Map<Integer, TaskAssignment> schedule = (Map<Integer, TaskAssignment>) decoded.get("schedule");
-
-        Map<String, Object> result = new HashMap<>();
-        result.put("best_perm", finalBest);
-        result.put("makespan", makespan);
-        result.put("schedule", schedule);
-        result.put("history", bestHistory);
-        return result;
+        DecodeResult finalDecoded = decodePermutation(bestPerm, tasks, vms);
+        Result res = new Result();
+        res.bestPerm = bestPerm;
+        res.bestMakespan = finalDecoded.makespan;
+        res.schedule = finalDecoded.schedule;
+        res.history = history;
+        return res;
     }
 
-    // ---------- Print helpers ----------
-    public static void printScheduleBrief(Map<Integer, TaskAssignment> schedule, int[] procTimes, int nMachines) {
-        List<List<int[]>> machines = new ArrayList<>();
-        for (int i = 0; i < nMachines; i++) machines.add(new ArrayList<>());
-        for (Map.Entry<Integer, TaskAssignment> e : schedule.entrySet()) {
-            int t = e.getKey();
-            TaskAssignment ta = e.getValue();
-            machines.get(ta.machine).add(new int[]{ta.start, ta.finish, t});
-        }
-        for (int i = 0; i < nMachines; i++) {
-            List<int[]> list = machines.get(i);
-            list.sort(Comparator.comparingInt(a -> a[0]));
-            StringBuilder sb = new StringBuilder();
-            sb.append("Machine ").append(i).append(": ");
-            for (int[] a : list) {
-                sb.append(String.format("[T%d: %d-%d] ", a[2], a[0], a[1]));
-            }
-            System.out.println(sb.toString());
-        }
+    static int[] tournament(List<int[]> pop, Task[] tasks, VM[] vms, Random rnd) {
+        int a = rnd.nextInt(pop.size());
+        int b = rnd.nextInt(pop.size());
+        double fa = decodePermutation(pop.get(a), tasks, vms).makespan;
+        double fb = decodePermutation(pop.get(b), tasks, vms).makespan;
+        return fa < fb ? pop.get(a) : pop.get(b);
     }
 
-    // LPT greedy baseline
-    public static Map<String, Object> lptSchedule(int[] procTimes, int nMachines) {
-        Integer[] tasks = new Integer[procTimes.length];
-        for (int i = 0; i < procTimes.length; i++) tasks[i] = i;
-        Arrays.sort(tasks, (x, y) -> Integer.compare(procTimes[y], procTimes[x])); // descending
-        PriorityQueue<MachineAvail> pq = new PriorityQueue<>();
-        for (int i = 0; i < nMachines; i++) pq.add(new MachineAvail(0, i));
-        Map<Integer, TaskAssignment> schedule = new HashMap<>();
-        for (int t : tasks) {
-            MachineAvail ma = pq.poll();
-            int start = ma.time;
-            int finish = start + procTimes[t];
-            schedule.put(t, new TaskAssignment(ma.machineId, start, finish));
-            pq.add(new MachineAvail(finish, ma.machineId));
-        }
-        int makespan = pq.stream().mapToInt(m -> m.time).max().orElse(0);
-        Map<String, Object> out = new HashMap<>();
-        out.put("makespan", makespan);
-        out.put("schedule", schedule);
-        return out;
-    }
-
-    // ---------- Main example ----------
+    // -------------------- Main example --------------------
     public static void main(String[] args) {
-        int nTasks = 20;
-        int nMachines = 4;
-        int seed = 42;
-        int[] procTimes = makeInstance(nTasks, seed);
+        Random rnd = new Random(12345);
+        int nTasks = 50;    // experiment-size
+        int nVMs = 4;
 
-        System.out.println("Proc times: " + Arrays.toString(procTimes));
+        // create tasks (length between 500..2000 MI to mimic paper ranges)
+        Task[] tasks = new Task[nTasks];
+        for (int i=0;i<nTasks;i++) tasks[i] = new Task(i, 500 + rnd.nextInt(1501)); // 500..2000
 
-        Map<String, Object> lpt = lptSchedule(procTimes, nMachines);
-        int lptMakespan = (int) lpt.get("makespan");
+        // create heterogeneous VMs (MIPS between 100..1000 as paper suggests)
+        VM[] vms = new VM[nVMs];
+        for (int j=0;j<nVMs;j++) vms[j] = new VM(j, 100 + rnd.nextInt(901)); // 100..1000
 
-        Map<String, Object> res = runGa(procTimes, nMachines,
-                80,   // pop_size
-                300,  // generations
-                0.9,  // cx_rate
-                0.2,  // mut_rate
-                2,    // elitism
-                123L, // seed
-                true  // verbose
+        // baseline
+        DecodeResult base = greedyBaseline(tasks, vms);
+        System.out.printf("Greedy baseline makespan (approx): %.4f\n", base.makespan);
+
+        // run MO-GA
+        Result r = runMOGA(tasks, vms,
+                60,    // popSize
+                500,   // generations
+                0.9,   // cxRate
+                0.25,  // mutRate
+                2,     // elitism
+                8,     // moSeeds
+                60,    // patience (stop if no improvement for 60 gens)
+                rnd
         );
 
-        int gaMakespan = (int) res.get("makespan");
-        int[] bestPerm = (int[]) res.get("best_perm");
-        @SuppressWarnings("unchecked")
-        Map<Integer, TaskAssignment> gaSchedule = (Map<Integer, TaskAssignment>) res.get("schedule");
-
-        System.out.println();
-        System.out.println("Results:");
-        System.out.println("- LPT makespan: " + lptMakespan);
-        System.out.println("- GA makespan:  " + gaMakespan);
-
-        System.out.println("\nLPT schedule (brief):");
-        @SuppressWarnings("unchecked")
-        Map<Integer, TaskAssignment> lptSchedule = (Map<Integer, TaskAssignment>) lpt.get("schedule");
-        printScheduleBrief(lptSchedule, procTimes, nMachines);
-
-        System.out.println("\nGA best schedule (brief):");
-        printScheduleBrief(gaSchedule, procTimes, nMachines);
-
-        System.out.println("\nBest permutation (first " + bestPerm.length + " entries):");
-        System.out.println(Arrays.toString(bestPerm));
+        System.out.printf("MO-GA best makespan: %.4f\n", r.bestMakespan);
+        System.out.println("Schedule (task -> vm, start-finish) sample:");
+        int shown = 0;
+        for (Map.Entry<Integer, Assignment> e : r.schedule.entrySet()) {
+            if (shown++ > 20) break;
+            System.out.printf("T%d -> VM%d : %.2f - %.2f\n", e.getKey(), e.getValue().vmId, e.getValue().start, e.getValue().finish);
+        }
+        System.out.println("Done.");
     }
 }
